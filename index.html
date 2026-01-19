@@ -310,36 +310,62 @@
       }
 
       async function saveMarkdown(filename, markdown) {
-        try {
-          if (directoryHandle) {
-            const hasPermission =
-              await ensureDirectoryPermission(directoryHandle);
-            if (!hasPermission) {
-              directoryHandle = null;
-              throw new Error(
-                "Folder access was denied. Please pick the save folder again.",
-              );
-            }
-            const fileHandle = await directoryHandle.getFileHandle(filename, {
-              create: true,
-            });
-            const writable = await fileHandle.createWritable();
-            await writable.write(markdown);
-            await writable.close();
+        if (directoryHandle) {
+          try {
+            await saveMarkdownToDirectory(filename, markdown);
             return;
+          } catch (error) {
+            if (isReadOnlyError(error)) {
+              folderStatus.textContent =
+                "Folder access is read-only. Please reselect the folder and allow write access.";
+              throw new Error(buildSaveErrorMessage(error));
+            }
+            throw new Error(buildSaveErrorMessage(error));
           }
+        }
 
-          const blob = new Blob([markdown], { type: "text/markdown" });
-          const link = document.createElement("a");
-          link.href = URL.createObjectURL(blob);
-          link.download = filename;
-          document.body.appendChild(link);
-          link.click();
-          link.remove();
-          URL.revokeObjectURL(link.href);
+        try {
+          await saveMarkdownAsDownload(filename, markdown);
         } catch (error) {
           throw new Error(buildSaveErrorMessage(error));
         }
+      }
+
+      async function saveMarkdownToDirectory(filename, markdown) {
+        const hasPermission = await ensureDirectoryPermission(directoryHandle);
+        if (!hasPermission) {
+          directoryHandle = null;
+          throw new Error(
+            "Folder access was denied. Please pick the save folder again.",
+          );
+        }
+
+        const fileHandle = await directoryHandle.getFileHandle(filename, {
+          create: true,
+        });
+        const hasFilePermission = await ensureFilePermission(fileHandle);
+        if (!hasFilePermission) {
+          throw new Error(
+            "Folder access was denied. Please pick the save folder again.",
+          );
+        }
+
+        const writable = await fileHandle.createWritable({
+          keepExistingData: false,
+        });
+        await writable.write(markdown);
+        await writable.close();
+      }
+
+      async function saveMarkdownAsDownload(filename, markdown) {
+        const blob = new Blob([markdown], { type: "text/markdown" });
+        const link = document.createElement("a");
+        link.href = URL.createObjectURL(blob);
+        link.download = filename;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        URL.revokeObjectURL(link.href);
       }
 
       async function ensureDirectoryPermission(handle) {
@@ -359,9 +385,44 @@
         return permission === "granted";
       }
 
+      async function ensureFilePermission(handle) {
+        if (!handle || !handle.queryPermission) {
+          return true;
+        }
+
+        let permission = await handle.queryPermission({ mode: "readwrite" });
+        if (permission === "granted") {
+          return true;
+        }
+
+        if (permission === "prompt") {
+          permission = await handle.requestPermission({ mode: "readwrite" });
+        }
+
+        return permission === "granted";
+      }
+
+      function isReadOnlyError(error) {
+        if (!error) {
+          return false;
+        }
+
+        const message = error.message ? error.message.toLowerCase() : "";
+        return (
+          error.name === "NoModificationAllowedError" ||
+          error.name === "NotAllowedError" ||
+          message.includes("read-only") ||
+          message.includes("readonly")
+        );
+      }
+
       function buildSaveErrorMessage(error) {
         if (!error) {
           return "Unable to save the converted file. Please retry or choose a different folder.";
+        }
+
+        if (isReadOnlyError(error)) {
+          return "Folder access is read-only. Please reselect the folder and allow write access.";
         }
 
         if (error.message) {
