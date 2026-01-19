@@ -139,8 +139,13 @@
       <section class="panel">
         <div class="controls">
           <div>
-            <label for="fileInput">Choose a file</label>
-            <input id="fileInput" type="file" accept=".pdf,.txt,.doc,.docx" />
+            <label for="fileInput">Choose file(s)</label>
+            <input
+              id="fileInput"
+              type="file"
+              accept=".pdf,.txt,.doc,.docx"
+              multiple
+            />
           </div>
           <div>
             <label>Save folder</label>
@@ -152,7 +157,7 @@
           <div>
             <label>&nbsp;</label>
             <button id="convertButton" type="button">Convert &amp; save</button>
-            <div class="status" id="convertStatus">Awaiting a file.</div>
+            <div class="status" id="convertStatus">Awaiting files.</div>
           </div>
         </div>
         <p class="note">
@@ -210,21 +215,31 @@
       });
 
       convertButton.addEventListener("click", async () => {
-        const file = fileInput.files[0];
-        if (!file) {
-          convertStatus.textContent = "Please choose a file first.";
+        const files = Array.from(fileInput.files || []);
+        if (files.length === 0) {
+          convertStatus.textContent = "Please choose file(s) first.";
           return;
         }
 
-        convertStatus.textContent = "Converting…";
+        convertStatus.textContent = `Converting ${files.length} file(s)…`;
         convertButton.disabled = true;
 
         try {
-          const markdown = await convertFileToMarkdown(file);
-          preview.value = markdown;
-          const targetName = `${stripExtension(file.name)}.md`;
-          await saveMarkdown(targetName, markdown);
-          convertStatus.textContent = `Saved ${targetName}.`;
+          const previewBlocks = [];
+          const savedNames = [];
+
+          for (const file of files) {
+            const markdown = await convertFileToMarkdown(file);
+            const targetName = `${stripExtension(file.name)}.md`;
+            await saveMarkdown(targetName, markdown);
+            savedNames.push(targetName);
+            previewBlocks.push(
+              `# ${file.name}\n\n${markdown}`.trim()
+            );
+          }
+
+          preview.value = previewBlocks.join("\n\n---\n\n");
+          convertStatus.textContent = `Saved ${savedNames.length} file(s).`;
         } catch (error) {
           console.error(error);
           convertStatus.textContent =
