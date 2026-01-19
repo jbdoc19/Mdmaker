@@ -229,13 +229,17 @@
           const savedNames = [];
 
           for (const file of files) {
-            const markdown = await convertFileToMarkdown(file);
-            const targetName = `${stripExtension(file.name)}.md`;
-            await saveMarkdown(targetName, markdown);
-            savedNames.push(targetName);
-            previewBlocks.push(
-              `# ${file.name}\n\n${markdown}`.trim()
-            );
+            try {
+              const markdown = await convertFileToMarkdown(file);
+              const targetName = `${stripExtension(file.name)}.md`;
+              await saveMarkdown(targetName, markdown);
+              savedNames.push(targetName);
+              previewBlocks.push(
+                `# ${file.name}\n\n${markdown}`.trim()
+              );
+            } catch (error) {
+              throw new Error(buildUserFacingError(error, file));
+            }
           }
 
           preview.value = previewBlocks.join("\n\n---\n\n");
@@ -243,7 +247,9 @@
         } catch (error) {
           console.error(error);
           convertStatus.textContent =
-            "Conversion failed. Please try another file or format.";
+            error instanceof Error && error.message
+              ? error.message
+              : "Conversion failed. Please try another file or format.";
         } finally {
           convertButton.disabled = false;
         }
@@ -262,10 +268,21 @@
         }
 
         if (extension === "pdf") {
+          if (!window.pdfjsLib) {
+            throw new Error(
+              "PDF engine failed to load. Check your network or try refreshing the page."
+            );
+          }
           return convertPdfToMarkdown(file);
         }
 
-        if (extension === "docx" || extension === "doc") {
+        if (extension === "doc") {
+          throw new Error(
+            "DOC files are not supported yet. Please upload a DOCX instead."
+          );
+        }
+
+        if (extension === "docx") {
           return convertDocxToMarkdown(file);
         }
 
@@ -295,24 +312,51 @@
       }
 
       async function saveMarkdown(filename, markdown) {
-        if (directoryHandle) {
-          const fileHandle = await directoryHandle.getFileHandle(filename, {
-            create: true,
-          });
-          const writable = await fileHandle.createWritable();
-          await writable.write(markdown);
-          await writable.close();
-          return;
+        try {
+          if (directoryHandle) {
+            const fileHandle = await directoryHandle.getFileHandle(filename, {
+              create: true,
+            });
+            const writable = await fileHandle.createWritable();
+            await writable.write(markdown);
+            await writable.close();
+            return;
+          }
+
+          const blob = new Blob([markdown], { type: "text/markdown" });
+          const link = document.createElement("a");
+          link.href = URL.createObjectURL(blob);
+          link.download = filename;
+          document.body.appendChild(link);
+          link.click();
+          link.remove();
+          URL.revokeObjectURL(link.href);
+        } catch (error) {
+          throw new Error(
+            "Unable to save the converted file. Please retry or choose a different folder."
+          );
+        }
+      }
+
+      function buildUserFacingError(error, file) {
+        const extension = file.name.split(".").pop().toLowerCase();
+        if (extension === "doc") {
+          return "DOC files are not supported yet. Please upload a DOCX instead.";
         }
 
-        const blob = new Blob([markdown], { type: "text/markdown" });
-        const link = document.createElement("a");
-        link.href = URL.createObjectURL(blob);
-        link.download = filename;
-        document.body.appendChild(link);
-        link.click();
-        link.remove();
-        URL.revokeObjectURL(link.href);
+        if (error && error.name === "PasswordException") {
+          return "This PDF is password-protected. Remove the password and try again.";
+        }
+
+        if (error && error.name === "InvalidPDFException") {
+          return "This PDF looks corrupted or unsupported. Try exporting it again.";
+        }
+
+        if (error && error.message) {
+          return error.message;
+        }
+
+        return "Conversion failed. Please try another file or format.";
       }
     </script>
   </body>
