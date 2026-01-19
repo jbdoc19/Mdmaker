@@ -316,11 +316,12 @@
             return;
           } catch (error) {
             if (isReadOnlyError(error)) {
+              directoryHandle = null;
               folderStatus.textContent =
-                "Folder access is read-only. Please reselect the folder and allow write access.";
+                "Folder access is read-only. Files will be downloaded instead.";
+            } else {
               throw new Error(buildSaveErrorMessage(error));
             }
-            throw new Error(buildSaveErrorMessage(error));
           }
         }
 
@@ -422,7 +423,7 @@
         }
 
         if (isReadOnlyError(error)) {
-          return "Folder access is read-only. Please reselect the folder and allow write access.";
+          return "Folder access is read-only. Please pick a different folder or allow write access.";
         }
 
         if (error.message) {
