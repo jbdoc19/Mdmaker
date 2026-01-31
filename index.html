@@ -327,12 +327,30 @@
         const sections = [];
 
         for (const item of book.spine.items) {
-          await item.load(book.load.bind(book));
-          const html = item.document?.body?.innerHTML || "";
+          let html = "";
+
+          if (typeof item.load === "function") {
+            await item.load(book.load.bind(book));
+            html = item.document?.body?.innerHTML || "";
+            if (typeof item.unload === "function") {
+              item.unload();
+            }
+          } else if (item.href) {
+            const contents = await book.load(item.href);
+            if (typeof contents === "string") {
+              const doc = new DOMParser().parseFromString(
+                contents,
+                "application/xhtml+xml",
+              );
+              html = doc.body?.innerHTML || "";
+            } else if (contents && contents.querySelector) {
+              html = contents.body?.innerHTML || contents.innerHTML || "";
+            }
+          }
+
           if (html.trim()) {
             sections.push(turndownService.turndown(html).trim());
           }
-          item.unload();
         }
 
         return sections.filter(Boolean).join("\n\n");
