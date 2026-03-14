@@ -185,6 +185,8 @@
       const convertButton = document.getElementById("convertButton");
       const convertStatus = document.getElementById("convertStatus");
       const preview = document.getElementById("preview");
+      const utf8Decoder = new TextDecoder("utf-8", { fatal: true });
+      const windows1252Decoder = new TextDecoder("windows-1252");
 
       let directoryHandle = null;
 
@@ -263,8 +265,7 @@
         const extension = file.name.split(".").pop().toLowerCase();
 
         if (extension === "txt") {
-          const text = await file.text();
-          return text.trim();
+          return readTextFilePreservingAccents(file);
         }
 
         if (extension === "pdf") {
@@ -311,14 +312,16 @@
           content += `${pageText}\n\n`;
         }
 
-        return content.trim();
+        return normalizeExtractedText(tryRepairMojibake(content)).trim();
       }
 
       function buildPdfReadingOrder(items, pageWidth) {
         const normalizedItems = items
-          .filter((item) => item && typeof item.str === "string" && item.str.trim())
+          .filter(
+            (item) => item && typeof item.str === "string" && item.str.trim(),
+          )
           .map((item) => ({
-            str: item.str.trim(),
+            str: normalizeExtractedText(tryRepairMojibake(item.str)).trim(),
             x: item.transform?.[4] ?? 0,
             y: item.transform?.[5] ?? 0,
             width: item.width || 0,
@@ -395,9 +398,7 @@
           return lines;
         }
 
-        const starts = lines
-          .map((line) => line.left)
-          .sort((a, b) => a - b);
+        const starts = lines.map((line) => line.left).sort((a, b) => a - b);
 
         const gaps = [];
         for (let index = 1; index < starts.length; index += 1) {
@@ -468,7 +469,7 @@
         const buffer = await file.arrayBuffer();
         const result = await mammoth.convertToHtml({ arrayBuffer: buffer });
         const markdown = turndownService.turndown(result.value);
-        return markdown.trim();
+        return normalizeExtractedText(tryRepairMojibake(markdown)).trim();
       }
 
       async function convertEpubToMarkdown(file) {
@@ -504,7 +505,45 @@
           }
         }
 
-        return sections.filter(Boolean).join("\n\n");
+        const markdown = sections.filter(Boolean).join("\n\n");
+        return normalizeExtractedText(tryRepairMojibake(markdown)).trim();
+      }
+
+      async function readTextFilePreservingAccents(file) {
+        const buffer = await file.arrayBuffer();
+        const bytes = new Uint8Array(buffer);
+
+        let text;
+        try {
+          text = utf8Decoder.decode(bytes);
+        } catch (error) {
+          text = windows1252Decoder.decode(bytes);
+        }
+
+        return normalizeExtractedText(tryRepairMojibake(text)).trim();
+      }
+
+      function normalizeExtractedText(text) {
+        return text
+          .normalize("NFC")
+          .replaceAll("\u00A0", " ")
+          .replace(/\r\n?/g, "\n");
+      }
+
+      function tryRepairMojibake(text) {
+        if (!/[ÃÂâ€]/.test(text)) {
+          return text;
+        }
+
+        try {
+          const bytes = Uint8Array.from(
+            text,
+            (char) => char.charCodeAt(0) & 0xff,
+          );
+          return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+        } catch (error) {
+          return text;
+        }
       }
 
       async function saveMarkdown(filename, markdown) {
