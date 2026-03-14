@@ -308,14 +308,19 @@
           const page = await pdf.getPage(pageNumber);
           const textContent = await page.getTextContent();
           const pageWidth = page.view[2] - page.view[0];
-          const pageText = buildPdfReadingOrder(textContent.items, pageWidth);
+          const pageHeight = page.view[3] - page.view[1];
+          const pageText = buildPdfReadingOrder(
+            textContent.items,
+            pageWidth,
+            pageHeight,
+          );
           content += `${pageText}\n\n`;
         }
 
         return normalizeExtractedText(tryRepairMojibake(content)).trim();
       }
 
-      function buildPdfReadingOrder(items, pageWidth) {
+      function buildPdfReadingOrder(items, pageWidth, pageHeight) {
         const normalizedItems = items
           .filter(
             (item) => item && typeof item.str === "string" && item.str.trim(),
@@ -333,8 +338,28 @@
         }
 
         const lines = groupPdfItemsIntoLines(normalizedItems);
-        const orderedLines = orderLinesForColumns(lines, pageWidth);
+        const cleanedLines = filterLikelyPageNumbers(lines, pageHeight);
+        const orderedLines = orderLinesForColumns(cleanedLines, pageWidth);
         return orderedLines.map((line) => line.text).join("\n");
+      }
+
+      function filterLikelyPageNumbers(lines, pageHeight) {
+        if (!pageHeight || lines.length < 3) {
+          return lines;
+        }
+
+        const topThreshold = pageHeight * 0.92;
+        const bottomThreshold = pageHeight * 0.08;
+
+        return lines.filter((line) => {
+          const inMargin = line.y >= topThreshold || line.y <= bottomThreshold;
+          if (!inMargin) {
+            return true;
+          }
+
+          const compactText = line.text.replace(/\s+/g, " ").trim();
+          return !/^(page\s+)?\d+(\s*(?:\/|of)\s*\d+)?$/i.test(compactText);
+        });
       }
 
       function groupPdfItemsIntoLines(items) {
@@ -399,7 +424,10 @@
         const baseThreshold =
           medianGap > 0
             ? Math.max(24, medianGap * 3.2)
-            : Math.max(24, average(sortedLineItems.map((item) => item.width)) * 2.5);
+            : Math.max(
+                24,
+                average(sortedLineItems.map((item) => item.width)) * 2.5,
+              );
 
         const segments = [];
         let currentSegment = [sortedLineItems[0]];
@@ -457,7 +485,6 @@
         const candidateLines = lines.filter(
           (line) => line.width <= narrowLineThreshold,
         );
-
         if (candidateLines.length < 8) {
           return lines;
         }
@@ -468,7 +495,6 @@
         }
 
         const { leftCenter, rightCenter, splitX } = layout;
-
         const fullWidthThreshold = pageWidth * 0.7;
         const fullWidthLines = [];
         const leftLines = [];
@@ -480,16 +506,19 @@
             continue;
           }
 
-          const distanceToLeft = Math.abs(line.center - leftCenter);
-          const distanceToRight = Math.abs(line.center - rightCenter);
-
-          if (distanceToLeft === distanceToRight) {
-            if (line.center <= splitX) {
-              leftLines.push(line);
-            } else {
+          if (line.center <= splitX) {
+            if (
+              Math.abs(line.center - rightCenter) <
+              Math.abs(line.center - leftCenter)
+            ) {
               rightLines.push(line);
+            } else {
+              leftLines.push(line);
             }
-          } else if (distanceToLeft < distanceToRight) {
+          } else if (
+            Math.abs(line.center - leftCenter) <
+            Math.abs(line.center - rightCenter)
+          ) {
             leftLines.push(line);
           } else {
             rightLines.push(line);
@@ -500,6 +529,9 @@
           return lines;
         }
 
+        leftLines.sort((a, b) => b.y - a.y);
+        rightLines.sort((a, b) => b.y - a.y);
+
         const topColumnY = Math.max(leftLines[0].y, rightLines[0].y);
         const bottomColumnY = Math.min(
           leftLines[leftLines.length - 1].y,
@@ -509,7 +541,7 @@
         const topFullWidth = fullWidthLines
           .filter((line) => line.y > topColumnY)
           .sort((a, b) => b.y - a.y);
-        const middleFullWidth = fullWidthLines
+        const midFullWidth = fullWidthLines
           .filter((line) => line.y <= topColumnY && line.y >= bottomColumnY)
           .sort((a, b) => b.y - a.y);
         const bottomFullWidth = fullWidthLines
@@ -520,8 +552,8 @@
           ...topFullWidth,
           ...leftLines,
           ...rightLines,
+          ...midFullWidth,
           ...bottomFullWidth,
-          ...middleFullWidth,
         ];
       }
 
