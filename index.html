@@ -302,20 +302,30 @@
       async function convertPdfToMarkdown(file) {
         const buffer = await file.arrayBuffer();
         const pdf = await pdfjsLib.getDocument({ data: buffer }).promise;
-        let content = "";
+        const pages = [];
 
         for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
           const page = await pdf.getPage(pageNumber);
           const textContent = await page.getTextContent();
           const pageWidth = page.view[2] - page.view[0];
           const pageHeight = page.view[3] - page.view[1];
-          const pageText = buildPdfReadingOrder(
+          const pageLines = buildPdfReadingOrder(
             textContent.items,
             pageWidth,
             pageHeight,
           );
-          content += `${pageText}\n\n`;
+          pages.push({
+            lines: pageLines,
+            width: pageWidth,
+            height: pageHeight,
+          });
         }
+
+        const cleanedPages = removeRepeatedPageFurniture(pages);
+        const content = cleanedPages
+          .map((page) => linesToMarkdown(page.lines, page.height))
+          .filter(Boolean)
+          .join("\n\n");
 
         return normalizeExtractedText(tryRepairMojibake(content)).trim();
       }
@@ -334,13 +344,12 @@
           }));
 
         if (normalizedItems.length === 0) {
-          return "";
+          return [];
         }
 
         const lines = groupPdfItemsIntoLines(normalizedItems);
         const cleanedLines = filterLikelyPageNumbers(lines, pageHeight);
-        const orderedLines = orderLinesForColumns(cleanedLines, pageWidth);
-        return orderedLines.map((line) => line.text).join("\n");
+        return orderLinesForColumns(cleanedLines, pageWidth);
       }
 
       function filterLikelyPageNumbers(lines, pageHeight) {
@@ -481,11 +490,9 @@
           return lines;
         }
 
-        const narrowLineThreshold = pageWidth * 0.62;
-        const candidateLines = lines.filter(
-          (line) => line.width <= narrowLineThreshold,
-        );
-        if (candidateLines.length < 8) {
+        const narrowLineThreshold = pageWidth * 0.74;
+        const candidateLines = lines.filter((line) => line.width < narrowLineThreshold);
+        if (candidateLines.length < 6) {
           return lines;
         }
 
@@ -494,11 +501,10 @@
           return lines;
         }
 
-        const { leftCenter, rightCenter, splitX } = layout;
-        const fullWidthThreshold = pageWidth * 0.7;
+        const { centers } = layout;
+        const fullWidthThreshold = pageWidth * 0.8;
         const fullWidthLines = [];
-        const leftLines = [];
-        const rightLines = [];
+        const columnLines = centers.map(() => []);
 
         for (const line of lines) {
           if (line.width >= fullWidthThreshold) {
@@ -506,36 +512,21 @@
             continue;
           }
 
-          if (line.center <= splitX) {
-            if (
-              Math.abs(line.center - rightCenter) <
-              Math.abs(line.center - leftCenter)
-            ) {
-              rightLines.push(line);
-            } else {
-              leftLines.push(line);
-            }
-          } else if (
-            Math.abs(line.center - leftCenter) <
-            Math.abs(line.center - rightCenter)
-          ) {
-            leftLines.push(line);
-          } else {
-            rightLines.push(line);
-          }
+          const columnIndex = nearestCenterIndex(line.center, centers);
+          columnLines[columnIndex].push(line);
         }
 
-        if (leftLines.length < 3 || rightLines.length < 3) {
+        if (columnLines.some((group) => group.length < 2)) {
           return lines;
         }
 
-        leftLines.sort((a, b) => b.y - a.y);
-        rightLines.sort((a, b) => b.y - a.y);
+        for (const group of columnLines) {
+          group.sort((a, b) => b.y - a.y);
+        }
 
-        const topColumnY = Math.max(leftLines[0].y, rightLines[0].y);
+        const topColumnY = Math.max(...columnLines.map((group) => group[0].y));
         const bottomColumnY = Math.min(
-          leftLines[leftLines.length - 1].y,
-          rightLines[rightLines.length - 1].y,
+          ...columnLines.map((group) => group[group.length - 1].y),
         );
 
         const topFullWidth = fullWidthLines
@@ -550,68 +541,246 @@
 
         return [
           ...topFullWidth,
-          ...leftLines,
-          ...rightLines,
+          ...columnLines.flatMap((group) => group),
           ...midFullWidth,
           ...bottomFullWidth,
         ];
       }
 
       function detectColumnCenters(lines, pageWidth) {
-        const centers = lines.map((line) => line.center);
-        let leftCenter = Math.min(...centers);
-        let rightCenter = Math.max(...centers);
+        const points = lines.map((line) => line.center);
+        let bestLayout = null;
 
-        if (rightCenter - leftCenter < pageWidth * 0.2) {
+        for (let k = 2; k <= 3; k += 1) {
+          if (points.length < k * 3) {
+            continue;
+          }
+
+          const clusters = kMeans1D(points, k);
+          if (!clusters) {
+            continue;
+          }
+
+          const sortedCenters = [...clusters.centers].sort((a, b) => a - b);
+          const minGap = Math.min(
+            ...sortedCenters.slice(1).map((center, index) => center - sortedCenters[index]),
+          );
+
+          if (minGap < Math.max(50, pageWidth * 0.12)) {
+            continue;
+          }
+
+          if (clusters.assignments.some((group) => group.length < 3)) {
+            continue;
+          }
+
+          const candidate = {
+            centers: sortedCenters,
+            score: clusters.betweenVariance / Math.max(1, clusters.withinVariance),
+          };
+
+          if (!bestLayout || candidate.score > bestLayout.score) {
+            bestLayout = candidate;
+          }
+        }
+
+        return bestLayout;
+      }
+
+      function kMeans1D(values, k) {
+        if (!values.length || k < 1) {
           return null;
         }
 
-        for (let i = 0; i < 8; i += 1) {
-          const leftGroup = [];
-          const rightGroup = [];
+        const sorted = [...values].sort((a, b) => a - b);
+        let centers = Array.from({ length: k }, (_, index) => {
+          const position = Math.floor((index * (sorted.length - 1)) / (k - 1));
+          return sorted[position];
+        });
 
-          for (const center of centers) {
-            if (
-              Math.abs(center - leftCenter) <= Math.abs(center - rightCenter)
-            ) {
-              leftGroup.push(center);
-            } else {
-              rightGroup.push(center);
+        let assignments = Array.from({ length: k }, () => []);
+
+        for (let iteration = 0; iteration < 12; iteration += 1) {
+          assignments = Array.from({ length: k }, () => []);
+          for (const value of sorted) {
+            const index = nearestCenterIndex(value, centers);
+            assignments[index].push(value);
+          }
+
+          const nextCenters = centers.map((center, index) => {
+            if (assignments[index].length === 0) {
+              return center;
             }
-          }
+            return average(assignments[index]);
+          });
 
-          if (leftGroup.length < 3 || rightGroup.length < 3) {
-            return null;
-          }
+          const moved = nextCenters.reduce(
+            (sum, center, index) => sum + Math.abs(center - centers[index]),
+            0,
+          );
 
-          const nextLeft = average(leftGroup);
-          const nextRight = average(rightGroup);
-          const moved =
-            Math.abs(nextLeft - leftCenter) + Math.abs(nextRight - rightCenter);
-
-          leftCenter = nextLeft;
-          rightCenter = nextRight;
-
-          if (moved < 1) {
+          centers = nextCenters;
+          if (moved < 0.5) {
             break;
           }
         }
 
-        if (leftCenter > rightCenter) {
-          [leftCenter, rightCenter] = [rightCenter, leftCenter];
-        }
-
-        const separation = rightCenter - leftCenter;
-        const minimumColumnGap = Math.max(60, pageWidth * 0.16);
-        if (separation < minimumColumnGap) {
-          return null;
-        }
+        const overallMean = average(sorted);
+        const withinVariance = assignments.reduce(
+          (sum, group, index) =>
+            sum +
+            group.reduce((inner, value) => inner + (value - centers[index]) ** 2, 0),
+          0,
+        );
+        const betweenVariance = assignments.reduce(
+          (sum, group, index) => sum + group.length * (centers[index] - overallMean) ** 2,
+          0,
+        );
 
         return {
-          leftCenter,
-          rightCenter,
-          splitX: (leftCenter + rightCenter) / 2,
+          centers,
+          assignments,
+          withinVariance,
+          betweenVariance,
         };
+      }
+
+      function nearestCenterIndex(value, centers) {
+        let bestIndex = 0;
+        let bestDistance = Infinity;
+
+        for (let i = 0; i < centers.length; i += 1) {
+          const distance = Math.abs(value - centers[i]);
+          if (distance < bestDistance) {
+            bestDistance = distance;
+            bestIndex = i;
+          }
+        }
+
+        return bestIndex;
+      }
+
+      function removeRepeatedPageFurniture(pages) {
+        if (pages.length < 2) {
+          return pages;
+        }
+
+        const topBottomKeyFrequency = new Map();
+
+        for (const page of pages) {
+          const topCutoff = page.height * 0.88;
+          const bottomCutoff = page.height * 0.12;
+          const seenOnPage = new Set();
+
+          for (const line of page.lines) {
+            if (line.y < topCutoff && line.y > bottomCutoff) {
+              continue;
+            }
+
+            const key = normalizeFurnitureKey(line.text);
+            if (!key || seenOnPage.has(key)) {
+              continue;
+            }
+            seenOnPage.add(key);
+            topBottomKeyFrequency.set(key, (topBottomKeyFrequency.get(key) || 0) + 1);
+          }
+        }
+
+        const minimumRepeats = Math.max(2, Math.ceil(pages.length * 0.35));
+        const repeatedKeys = new Set(
+          [...topBottomKeyFrequency.entries()]
+            .filter(([, count]) => count >= minimumRepeats)
+            .map(([key]) => key),
+        );
+
+        if (repeatedKeys.size === 0) {
+          return pages;
+        }
+
+        return pages.map((page) => ({
+          ...page,
+          lines: page.lines.filter((line) => {
+            const key = normalizeFurnitureKey(line.text);
+            return !key || !repeatedKeys.has(key);
+          }),
+        }));
+      }
+
+      function normalizeFurnitureKey(text) {
+        if (!text) {
+          return "";
+        }
+
+        return text
+          .toLowerCase()
+          .replace(/\b\d+\b/g, "#")
+          .replace(/\s+/g, " ")
+          .replace(/[^\p{L}\p{N}# ]/gu, "")
+          .trim();
+      }
+
+      function linesToMarkdown(lines, pageHeight) {
+        if (!lines.length) {
+          return "";
+        }
+
+        const paragraphs = [];
+        let buffer = [];
+
+        for (let i = 0; i < lines.length; i += 1) {
+          const line = lines[i];
+          const next = lines[i + 1];
+
+          if (isLikelyHeading(line, next)) {
+            flushParagraph(buffer, paragraphs);
+            paragraphs.push(`## ${line.text.trim()}`);
+            continue;
+          }
+
+          buffer.push(line.text.trim());
+
+          const hardBreak = !next || shouldBreakParagraph(line, next, pageHeight);
+          if (hardBreak) {
+            flushParagraph(buffer, paragraphs);
+            buffer = [];
+          }
+        }
+
+        flushParagraph(buffer, paragraphs);
+        return paragraphs.join("\n\n");
+      }
+
+      function flushParagraph(buffer, paragraphs) {
+        if (!buffer.length) {
+          return;
+        }
+        paragraphs.push(buffer.join(" ").replace(/\s+/g, " ").trim());
+      }
+
+      function shouldBreakParagraph(current, next, pageHeight) {
+        const verticalGap = current.y - next.y;
+        const bigGap = verticalGap > Math.max(current.height, next.height) * 1.9;
+        const endsSentence = /[.!?:”)"]$/.test(current.text.trim());
+        const nextStartsParagraph = /^[A-Z“"(]/.test(next.text.trim());
+        const crossPageFooterZone = next.y < pageHeight * 0.08 || current.y > pageHeight * 0.92;
+        return bigGap || (endsSentence && nextStartsParagraph) || crossPageFooterZone;
+      }
+
+      function isLikelyHeading(line, next) {
+        const text = line.text.trim();
+        if (!text || text.length > 110) {
+          return false;
+        }
+
+        if (/^(abstract|introduction|conclusion|references|keywords?)\b/i.test(text)) {
+          return true;
+        }
+
+        const looksLikeNumberedHeading = /^\d+(\.\d+)*\s+\S+/.test(text);
+        const endsAsHeading = !/[.!?]$/.test(text);
+        const nextStartsSentence = next && /^[A-Z]/.test(next.text.trim());
+
+        return looksLikeNumberedHeading || (endsAsHeading && nextStartsSentence && text.split(/\s+/).length <= 12);
       }
 
       function average(values) {
