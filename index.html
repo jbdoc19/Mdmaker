@@ -386,6 +386,7 @@
               y: line.y,
               left,
               right,
+              center: (left + right) / 2,
               width: right - left,
               text: sortedLineItems.map((item) => item.str).join(" "),
             };
@@ -398,25 +399,21 @@
           return lines;
         }
 
-        const starts = lines.map((line) => line.left).sort((a, b) => a - b);
+        const narrowLineThreshold = pageWidth * 0.62;
+        const candidateLines = lines.filter(
+          (line) => line.width <= narrowLineThreshold,
+        );
 
-        const gaps = [];
-        for (let index = 1; index < starts.length; index += 1) {
-          gaps.push(starts[index] - starts[index - 1]);
-        }
-
-        if (gaps.length === 0) {
+        if (candidateLines.length < 8) {
           return lines;
         }
 
-        const maxGap = Math.max(...gaps);
-        const maxGapIndex = gaps.indexOf(maxGap);
-        const splitX = (starts[maxGapIndex] + starts[maxGapIndex + 1]) / 2;
-        const minimumColumnGap = Math.max(40, pageWidth * 0.12);
-
-        if (maxGap < minimumColumnGap) {
+        const layout = detectColumnCenters(candidateLines, pageWidth);
+        if (!layout) {
           return lines;
         }
+
+        const { leftCenter, rightCenter, splitX } = layout;
 
         const fullWidthThreshold = pageWidth * 0.7;
         const fullWidthLines = [];
@@ -429,7 +426,16 @@
             continue;
           }
 
-          if (line.left < splitX) {
+          const distanceToLeft = Math.abs(line.center - leftCenter);
+          const distanceToRight = Math.abs(line.center - rightCenter);
+
+          if (distanceToLeft === distanceToRight) {
+            if (line.center <= splitX) {
+              leftLines.push(line);
+            } else {
+              rightLines.push(line);
+            }
+          } else if (distanceToLeft < distanceToRight) {
             leftLines.push(line);
           } else {
             rightLines.push(line);
@@ -460,9 +466,73 @@
           ...topFullWidth,
           ...leftLines,
           ...rightLines,
-          ...middleFullWidth,
           ...bottomFullWidth,
+          ...middleFullWidth,
         ];
+      }
+
+      function detectColumnCenters(lines, pageWidth) {
+        const centers = lines.map((line) => line.center);
+        let leftCenter = Math.min(...centers);
+        let rightCenter = Math.max(...centers);
+
+        if (rightCenter - leftCenter < pageWidth * 0.2) {
+          return null;
+        }
+
+        for (let i = 0; i < 8; i += 1) {
+          const leftGroup = [];
+          const rightGroup = [];
+
+          for (const center of centers) {
+            if (
+              Math.abs(center - leftCenter) <= Math.abs(center - rightCenter)
+            ) {
+              leftGroup.push(center);
+            } else {
+              rightGroup.push(center);
+            }
+          }
+
+          if (leftGroup.length < 3 || rightGroup.length < 3) {
+            return null;
+          }
+
+          const nextLeft = average(leftGroup);
+          const nextRight = average(rightGroup);
+          const moved =
+            Math.abs(nextLeft - leftCenter) + Math.abs(nextRight - rightCenter);
+
+          leftCenter = nextLeft;
+          rightCenter = nextRight;
+
+          if (moved < 1) {
+            break;
+          }
+        }
+
+        if (leftCenter > rightCenter) {
+          [leftCenter, rightCenter] = [rightCenter, leftCenter];
+        }
+
+        const separation = rightCenter - leftCenter;
+        const minimumColumnGap = Math.max(60, pageWidth * 0.16);
+        if (separation < minimumColumnGap) {
+          return null;
+        }
+
+        return {
+          leftCenter,
+          rightCenter,
+          splitX: (leftCenter + rightCenter) / 2,
+        };
+      }
+
+      function average(values) {
+        if (values.length === 0) {
+          return 0;
+        }
+        return values.reduce((sum, value) => sum + value, 0) / values.length;
       }
 
       async function convertDocxToMarkdown(file) {
@@ -535,15 +605,38 @@
           return text;
         }
 
-        try {
-          const bytes = Uint8Array.from(
-            text,
-            (char) => char.charCodeAt(0) & 0xff,
-          );
-          return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-        } catch (error) {
-          return text;
-        }
+        return text.replace(/\S+/g, (token) => {
+          if (!/[ÃÂâ€]/.test(token)) {
+            return token;
+          }
+
+          try {
+            const bytes = Uint8Array.from(
+              token,
+              (char) => char.charCodeAt(0) & 0xff,
+            );
+            const repaired = new TextDecoder("utf-8", { fatal: false }).decode(
+              bytes,
+            );
+
+            if (
+              countMojibakeMarkers(repaired) <= countMojibakeMarkers(token) &&
+              repaired.replace(/[\p{L}\p{N}]/gu, "").length <=
+                token.replace(/[\p{L}\p{N}]/gu, "").length + 2
+            ) {
+              return repaired;
+            }
+          } catch (error) {
+            return token;
+          }
+
+          return token;
+        });
+      }
+
+      function countMojibakeMarkers(value) {
+        const matches = value.match(/[ÃÂâ€�™œž]/g);
+        return matches ? matches.length : 0;
       }
 
       async function saveMarkdown(filename, markdown) {
