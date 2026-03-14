@@ -306,11 +306,162 @@
         for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
           const page = await pdf.getPage(pageNumber);
           const textContent = await page.getTextContent();
-          const pageText = textContent.items.map((item) => item.str).join(" ");
+          const pageWidth = page.view[2] - page.view[0];
+          const pageText = buildPdfReadingOrder(textContent.items, pageWidth);
           content += `${pageText}\n\n`;
         }
 
         return content.trim();
+      }
+
+      function buildPdfReadingOrder(items, pageWidth) {
+        const normalizedItems = items
+          .filter((item) => item && typeof item.str === "string" && item.str.trim())
+          .map((item) => ({
+            str: item.str.trim(),
+            x: item.transform?.[4] ?? 0,
+            y: item.transform?.[5] ?? 0,
+            width: item.width || 0,
+            height: item.height || 10,
+          }));
+
+        if (normalizedItems.length === 0) {
+          return "";
+        }
+
+        const lines = groupPdfItemsIntoLines(normalizedItems);
+        const orderedLines = orderLinesForColumns(lines, pageWidth);
+        return orderedLines.map((line) => line.text).join("\n");
+      }
+
+      function groupPdfItemsIntoLines(items) {
+        const sortedItems = [...items].sort((a, b) => {
+          if (Math.abs(b.y - a.y) > 1) {
+            return b.y - a.y;
+          }
+          return a.x - b.x;
+        });
+
+        const lines = [];
+
+        for (const item of sortedItems) {
+          const tolerance = Math.max(2, item.height * 0.7);
+          let bestLine = null;
+          let bestDistance = Infinity;
+
+          for (const line of lines) {
+            const distance = Math.abs(line.y - item.y);
+            if (distance <= tolerance && distance < bestDistance) {
+              bestDistance = distance;
+              bestLine = line;
+            }
+          }
+
+          if (!bestLine) {
+            bestLine = {
+              y: item.y,
+              items: [],
+            };
+            lines.push(bestLine);
+          }
+
+          bestLine.items.push(item);
+          bestLine.y =
+            (bestLine.y * (bestLine.items.length - 1) + item.y) /
+            bestLine.items.length;
+        }
+
+        return lines
+          .map((line) => {
+            const sortedLineItems = line.items.sort((a, b) => a.x - b.x);
+            const left = sortedLineItems[0].x;
+            const right = Math.max(
+              ...sortedLineItems.map((item) => item.x + item.width),
+            );
+
+            return {
+              y: line.y,
+              left,
+              right,
+              width: right - left,
+              text: sortedLineItems.map((item) => item.str).join(" "),
+            };
+          })
+          .sort((a, b) => b.y - a.y);
+      }
+
+      function orderLinesForColumns(lines, pageWidth) {
+        if (lines.length < 8) {
+          return lines;
+        }
+
+        const starts = lines
+          .map((line) => line.left)
+          .sort((a, b) => a - b);
+
+        const gaps = [];
+        for (let index = 1; index < starts.length; index += 1) {
+          gaps.push(starts[index] - starts[index - 1]);
+        }
+
+        if (gaps.length === 0) {
+          return lines;
+        }
+
+        const maxGap = Math.max(...gaps);
+        const maxGapIndex = gaps.indexOf(maxGap);
+        const splitX = (starts[maxGapIndex] + starts[maxGapIndex + 1]) / 2;
+        const minimumColumnGap = Math.max(40, pageWidth * 0.12);
+
+        if (maxGap < minimumColumnGap) {
+          return lines;
+        }
+
+        const fullWidthThreshold = pageWidth * 0.7;
+        const fullWidthLines = [];
+        const leftLines = [];
+        const rightLines = [];
+
+        for (const line of lines) {
+          if (line.width >= fullWidthThreshold) {
+            fullWidthLines.push(line);
+            continue;
+          }
+
+          if (line.left < splitX) {
+            leftLines.push(line);
+          } else {
+            rightLines.push(line);
+          }
+        }
+
+        if (leftLines.length < 3 || rightLines.length < 3) {
+          return lines;
+        }
+
+        const topColumnY = Math.max(leftLines[0].y, rightLines[0].y);
+        const bottomColumnY = Math.min(
+          leftLines[leftLines.length - 1].y,
+          rightLines[rightLines.length - 1].y,
+        );
+
+        const topFullWidth = fullWidthLines
+          .filter((line) => line.y > topColumnY)
+          .sort((a, b) => b.y - a.y);
+        const middleFullWidth = fullWidthLines
+          .filter((line) => line.y <= topColumnY && line.y >= bottomColumnY)
+          .sort((a, b) => b.y - a.y);
+        const bottomFullWidth = fullWidthLines
+          .filter((line) => line.y < bottomColumnY)
+          .sort((a, b) => b.y - a.y);
+
+        return [
+          ...topFullWidth,
+          ...leftLines,
+          ...rightLines,
+          ...middleFullWidth,
+          ...bottomFullWidth,
+        ];
       }
 
       async function convertDocxToMarkdown(file) {
