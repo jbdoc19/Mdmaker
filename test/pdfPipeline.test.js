@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { convertPdfItemsToMarkdown } = require('../pdfPipeline');
+const { convertPdfItemsToMarkdown, extractStructuredPages } = require('../pdfPipeline');
 
 function page(width, height, lines) {
   return {
@@ -159,4 +159,55 @@ test('paragraph buffer resets and does not duplicate incrementally', () => {
   const count = (md.match(/First paragraph line one\./g) || []).length;
   assert.equal(count, 1);
   assert.doesNotMatch(md, /First paragraph line one\..*First paragraph line one\./);
+});
+
+test('extractStructuredPages returns one entry per page with text and headings', () => {
+  const pages = extractStructuredPages([
+    page(600, 800, [
+      { text: 'Introduction', x: 80, y: 740, width: 150, font: 14, fontName: 'Bold' },
+      { text: 'This is the first line of a paragraph', x: 80, y: 710, width: 360 },
+      { text: 'that continues naturally.', x: 80, y: 696, width: 220 },
+    ]),
+    page(600, 800, [
+      { text: 'Methods', x: 80, y: 740, width: 150, font: 14, fontName: 'Bold' },
+      { text: 'Second page body text here.', x: 80, y: 710, width: 360 },
+    ]),
+  ]);
+  assert.equal(pages.length, 2);
+  assert.equal(pages[0].page, 1);
+  assert.ok(pages[0].headings.includes('Introduction'));
+  assert.match(pages[0].text, /Introduction/);
+  assert.match(pages[0].text, /This is the first line of a paragraph that continues naturally\./);
+  assert.ok(pages[0].char_count > 0);
+  assert.equal(pages[1].page, 2);
+  assert.ok(pages[1].headings.includes('Methods'));
+  assert.match(pages[1].text, /Second page body text here\./);
+});
+
+test('extractStructuredPages suppresses repeated furniture across pages', () => {
+  const rawPages = [1, 2, 3].map((n) =>
+    page(700, 900, [
+      { text: 'Running Header', x: 200, y: 870, width: 220 },
+      { text: `Body page ${n}`, x: 90, y: 700, width: 220 },
+      { text: `${n}`, x: 340, y: 30, width: 20 },
+    ]),
+  );
+  const pages = extractStructuredPages(rawPages);
+  assert.equal(pages.length, 3);
+  for (const p of pages) {
+    assert.doesNotMatch(p.text, /Running Header/);
+  }
+  assert.match(pages[0].text, /Body page 1/);
+  assert.match(pages[2].text, /Body page 3/);
+});
+
+test('extractStructuredPages returns empty text for pages with only furniture', () => {
+  const pages = extractStructuredPages([
+    page(600, 800, [
+      { text: 'Page 1', x: 280, y: 20, width: 40 },
+    ]),
+  ]);
+  assert.equal(pages.length, 1);
+  assert.equal(pages[0].text, '');
+  assert.equal(pages[0].char_count, 0);
 });

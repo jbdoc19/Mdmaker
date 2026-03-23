@@ -437,9 +437,65 @@
     return assembleMarkdown(cleaned);
   }
 
+  function extractPageText(page) {
+    const ordered = orderPageLines(page);
+    const headings = [];
+    const paragraphs = [];
+    let paragraphBuffer = [];
+
+    const flushParagraph = () => {
+      const text = mergeLines(paragraphBuffer);
+      if (text) paragraphs.push(text);
+      paragraphBuffer = [];
+    };
+
+    for (let i = 0; i < ordered.length; i += 1) {
+      const line = ordered[i];
+      const next = i + 1 < ordered.length ? ordered[i + 1] : null;
+
+      if (["furniture", "page_number", "license", "sidebar"].includes(line.region)) {
+        continue;
+      }
+
+      if (line.region === "heading" || line.region.endsWith("_heading")) {
+        flushParagraph();
+        const clean = line.text.replace(/:$/, "").trim();
+        headings.push(clean);
+        paragraphs.push(clean);
+        continue;
+      }
+
+      paragraphBuffer.push(line);
+      if (shouldBreakParagraph(line, next)) {
+        flushParagraph();
+      }
+    }
+    flushParagraph();
+
+    const text = paragraphs.filter(Boolean).join("\n\n").replace(/\n{3,}/g, "\n\n").trim();
+    return { text, headings };
+  }
+
+  function extractStructuredPages(rawPages) {
+    const analyzed = rawPages.map((page, i) =>
+      analyzePage(page.items, page.width, page.height, i + 1),
+    );
+    const cleaned = suppressRepeatedFurniture(analyzed);
+    return cleaned.map((page, i) => {
+      const { text, headings } = extractPageText(page);
+      return {
+        page: i + 1,
+        text,
+        headings,
+        char_count: text.length,
+      };
+    });
+  }
+
   const api = {
     analyzePage,
     convertPdfItemsToMarkdown,
+    extractStructuredPages,
     suppressRepeatedFurniture,
     orderPageLines,
     assembleMarkdown,
