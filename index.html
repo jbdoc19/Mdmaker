@@ -123,6 +123,17 @@
         font-weight: 600;
         margin-left: 6px;
       }
+
+      select {
+        width: 100%;
+        padding: 10px;
+        border-radius: 8px;
+        border: 1px solid rgba(148, 163, 184, 0.4);
+        background: #0f172a;
+        color: #e2e8f0;
+        font-size: 1rem;
+        cursor: pointer;
+      }
     </style>
   </head>
   <body>
@@ -131,9 +142,9 @@
       <p>
         Convert <strong>PDF</strong>, <strong>TXT</strong>,
         <strong>DOC</strong>, <strong>DOCX</strong>, and <strong>EPUB</strong>
-        files into Markdown. After conversion, the file is automatically saved
-        to the folder you pick on your phone (or downloaded if your browser does
-        not allow folder access).
+        files into Markdown or JSON. After conversion, the file is automatically
+        saved to the folder you pick on your phone (or downloaded if your
+        browser does not allow folder access).
       </p>
 
       <section class="panel">
@@ -155,6 +166,13 @@
             <div class="status" id="folderStatus">No folder selected yet.</div>
           </div>
           <div>
+            <label for="formatSelect">Output format</label>
+            <select id="formatSelect">
+              <option value="md">Markdown (.md)</option>
+              <option value="json">JSON (.json)</option>
+            </select>
+          </div>
+          <div>
             <label>&nbsp;</label>
             <button id="convertButton" type="button">Convert &amp; save</button>
             <div class="status" id="convertStatus">Awaiting files.</div>
@@ -168,7 +186,7 @@
       </section>
 
       <section class="panel">
-        <h2>Markdown preview</h2>
+        <h2>Output preview</h2>
         <textarea id="preview" readonly></textarea>
       </section>
     </main>
@@ -186,6 +204,7 @@
       const convertButton = document.getElementById("convertButton");
       const convertStatus = document.getElementById("convertStatus");
       const preview = document.getElementById("preview");
+      const formatSelect = document.getElementById("formatSelect");
       const utf8Decoder = new TextDecoder("utf-8", { fatal: true });
       const windows1252Decoder = new TextDecoder("windows-1252");
 
@@ -226,6 +245,7 @@
           return;
         }
 
+        const fmt = formatSelect.value;
         convertStatus.textContent = `Converting ${files.length} file(s)…`;
         convertButton.disabled = true;
 
@@ -235,11 +255,21 @@
 
           for (const file of files) {
             try {
-              const markdown = await convertFileToMarkdown(file);
-              const targetName = `${stripExtension(file.name)}.md`;
-              await saveMarkdown(targetName, markdown);
+              let content, targetName, mimeType;
+              if (fmt === "json") {
+                content = await convertFileToJson(file);
+                targetName = `${stripExtension(file.name)}.json`;
+                mimeType = "application/json";
+              } else {
+                content = await convertFileToMarkdown(file);
+                targetName = `${stripExtension(file.name)}.md`;
+                mimeType = "text/markdown";
+              }
+              await saveFile(targetName, content, mimeType);
               savedNames.push(targetName);
-              previewBlocks.push(`# ${file.name}\n\n${markdown}`.trim());
+              previewBlocks.push(
+                fmt === "json" ? content : `# ${file.name}\n\n${content}`.trim(),
+              );
             } catch (error) {
               throw new Error(buildUserFacingError(error, file));
             }
@@ -319,6 +349,181 @@
 
         const content = window.PdfPipeline.convertPdfItemsToMarkdown(rawPages);
         return normalizeExtractedText(tryRepairMojibake(content)).trim();
+      }
+
+      async function convertFileToJson(file) {
+        const extension = file.name.split(".").pop().toLowerCase();
+
+        if (extension === "doc") {
+          throw new Error(
+            "DOC files are not supported yet. Please upload a DOCX instead.",
+          );
+        }
+
+        if (extension === "pdf") {
+          if (!window.pdfjsLib) {
+            throw new Error(
+              "PDF engine failed to load. Check your network or try refreshing the page.",
+            );
+          }
+          return convertPdfToJson(file);
+        }
+
+        const markdown = await convertFileToMarkdown(file);
+        return buildJsonForText(file, markdown);
+      }
+
+      async function convertPdfToJson(file) {
+        const buffer = await file.arrayBuffer();
+        const pdf = await pdfjsLib.getDocument({ data: buffer }).promise;
+        const rawPages = [];
+
+        for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
+          const page = await pdf.getPage(pageNumber);
+          const textContent = await page.getTextContent();
+          const pageWidth = page.view[2] - page.view[0];
+          const pageHeight = page.view[3] - page.view[1];
+          rawPages.push({
+            items: textContent.items,
+            width: pageWidth,
+            height: pageHeight,
+          });
+        }
+
+        const structuredPages = window.PdfPipeline.extractStructuredPages(rawPages);
+        const chunks = chunkPages(structuredPages);
+
+        const payload = {
+          schema: "mdmaker.pdf.llm.v1",
+          source: {
+            filename: file.name,
+            size_bytes: file.size,
+            last_modified: new Date(file.lastModified).toISOString(),
+          },
+          extraction: {
+            date: new Date().toISOString(),
+            ocr_applied: false,
+            note: "Text extracted using PDF.js. Scanned pages may yield empty or sparse text.",
+          },
+          page_count: rawPages.length,
+          pages: structuredPages.map(({ page, text, char_count }) => ({
+            page,
+            text,
+            char_count,
+          })),
+          chunks,
+        };
+
+        return JSON.stringify(payload, null, 2);
+      }
+
+      function buildJsonForText(file, text) {
+        const chunks = chunkText(text);
+        const payload = {
+          schema: "mdmaker.text.v1",
+          source: {
+            filename: file.name,
+            size_bytes: file.size,
+            last_modified: new Date(file.lastModified).toISOString(),
+          },
+          extraction: {
+            date: new Date().toISOString(),
+          },
+          text,
+          chunks,
+        };
+        return JSON.stringify(payload, null, 2);
+      }
+
+      function chunkPages(pages, targetSize, overlap) {
+        targetSize = targetSize ?? 15000;
+        overlap = overlap ?? 1200;
+
+        const chunks = [];
+        let buffer = "";
+        let pageStart = null;
+        let pageEnd = null;
+        let headings = [];
+
+        const flush = () => {
+          const text = buffer.trim();
+          if (!text) {
+            buffer = "";
+            return;
+          }
+          const id = "chunk-" + String(chunks.length + 1).padStart(4, "0");
+          chunks.push({
+            id,
+            text,
+            page_start: pageStart,
+            page_end: pageEnd,
+            headings: [...new Set(headings)],
+            char_count: text.length,
+          });
+          buffer = text.length > overlap ? text.slice(-overlap) : text;
+          pageStart = pageEnd;
+          headings = [];
+        };
+
+        for (const pg of pages) {
+          if (!pg.text) continue;
+          if (pageStart === null) pageStart = pg.page;
+          pageEnd = pg.page;
+          headings.push(...(pg.headings || []));
+          buffer += (buffer ? "\n\n" : "") + pg.text;
+          if (buffer.length >= targetSize) {
+            flush();
+          }
+        }
+
+        if (buffer.trim()) {
+          const id = "chunk-" + String(chunks.length + 1).padStart(4, "0");
+          chunks.push({
+            id,
+            text: buffer.trim(),
+            page_start: pageStart ?? 1,
+            page_end: pageEnd ?? 1,
+            headings: [...new Set(headings)],
+            char_count: buffer.trim().length,
+          });
+        }
+
+        return chunks;
+      }
+
+      function chunkText(text, targetSize, overlap) {
+        targetSize = targetSize ?? 15000;
+        overlap = overlap ?? 1200;
+
+        const paragraphs = text.split(/\n\n+/);
+        const chunks = [];
+        let buffer = "";
+
+        const flush = () => {
+          const content = buffer.trim();
+          if (!content) {
+            buffer = "";
+            return;
+          }
+          const id = "chunk-" + String(chunks.length + 1).padStart(4, "0");
+          chunks.push({ id, text: content, char_count: content.length });
+          buffer = content.length > overlap ? content.slice(-overlap) : content;
+        };
+
+        for (const para of paragraphs) {
+          if (!para.trim()) continue;
+          buffer += (buffer ? "\n\n" : "") + para.trim();
+          if (buffer.length >= targetSize) {
+            flush();
+          }
+        }
+
+        if (buffer.trim()) {
+          const id = "chunk-" + String(chunks.length + 1).padStart(4, "0");
+          chunks.push({ id, text: buffer.trim(), char_count: buffer.trim().length });
+        }
+
+        return chunks;
       }
 
       function average(values) {
@@ -432,10 +637,10 @@
         return matches ? matches.length : 0;
       }
 
-      async function saveMarkdown(filename, markdown) {
+      async function saveFile(filename, content, mimeType) {
         if (directoryHandle) {
           try {
-            await saveMarkdownToDirectory(filename, markdown);
+            await saveFileToDirectory(filename, content);
             return;
           } catch (error) {
             if (isReadOnlyError(error)) {
@@ -449,13 +654,13 @@
         }
 
         try {
-          await saveMarkdownAsDownload(filename, markdown);
+          await saveFileAsDownload(filename, content, mimeType);
         } catch (error) {
           throw new Error(buildSaveErrorMessage(error));
         }
       }
 
-      async function saveMarkdownToDirectory(filename, markdown) {
+      async function saveFileToDirectory(filename, content) {
         const hasPermission = await ensureDirectoryPermission(directoryHandle);
         if (!hasPermission) {
           directoryHandle = null;
@@ -477,12 +682,12 @@
         const writable = await fileHandle.createWritable({
           keepExistingData: false,
         });
-        await writable.write(markdown);
+        await writable.write(content);
         await writable.close();
       }
 
-      async function saveMarkdownAsDownload(filename, markdown) {
-        const blob = new Blob([markdown], { type: "text/markdown" });
+      async function saveFileAsDownload(filename, content, mimeType) {
+        const blob = new Blob([content], { type: mimeType });
         const link = document.createElement("a");
         link.href = URL.createObjectURL(blob);
         link.download = filename;
