@@ -235,8 +235,6 @@ test('ocr-overlay routing demotes short false headings', () => {
   assert.doesNotMatch(md, /## IX/);
   assert.match(md, /IX\s+This is body text under a noisy short heading\./);
 });
-
-
 test('block ordering keeps top matter before two-column body and footer after', () => {
   const md = convertPdfItemsToMarkdown([
     page(900, 1200, [
