@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { convertPdfItemsToMarkdown, extractStructuredPages } = require('../pdfPipeline');
+const { convertPdfItemsToMarkdown, extractStructuredPages, analyzeDocumentProfile } = require('../pdfPipeline');
 
 function page(width, height, lines) {
   return {
@@ -210,4 +210,28 @@ test('extractStructuredPages returns empty text for pages with only furniture', 
   assert.equal(pages.length, 1);
   assert.equal(pages[0].text, '');
   assert.equal(pages[0].char_count, 0);
+});
+
+
+test('preflight classifier marks glyphless-heavy content as ocr-overlay', () => {
+  const profile = analyzeDocumentProfile([
+    page(600, 800, [
+      { text: 'A noisy title', x: 80, y: 740, width: 150, fontName: 'GlyphLessFont' },
+      { text: '%%% ####', x: 80, y: 710, width: 120, fontName: 'GlyphLessFont' },
+      { text: 'withveryveryverylongmergedtoken', x: 80, y: 690, width: 220, fontName: 'GlyphLessFont' },
+    ]),
+  ]);
+  assert.equal(profile.classification, 'ocr-overlay');
+  assert.ok(profile.reasons.includes('glyphless_font_layer'));
+});
+
+test('ocr-overlay routing demotes short false headings', () => {
+  const md = convertPdfItemsToMarkdown([
+    page(700, 900, [
+      { text: 'IX', x: 90, y: 850, width: 30, font: 18, fontName: 'GlyphLessFont Bold' },
+      { text: 'This is body text under a noisy short heading.', x: 90, y: 810, width: 420, fontName: 'GlyphLessFont' },
+    ]),
+  ]);
+  assert.doesNotMatch(md, /## IX/);
+  assert.match(md, /IX\s+This is body text under a noisy short heading\./);
 });

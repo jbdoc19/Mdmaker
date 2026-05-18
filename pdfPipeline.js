@@ -429,10 +429,101 @@
     return out.filter(Boolean).join("\n\n").replace(/\n{3,}/g, "\n\n").trim();
   }
 
+
+  function analyzeDocumentProfile(rawPages) {
+    const pages = rawPages || [];
+    const profile = {
+      pageCount: pages.length,
+      sampledPages: 0,
+      textItemCount: 0,
+      wordCount: 0,
+      alphabeticCount: 0,
+      symbolCount: 0,
+      longWordCount: 0,
+      glyphlessItemRatio: 0,
+      avgTextLenPerItem: 0,
+      classification: "digital-native",
+      confidence: "medium",
+      reasons: [],
+    };
+
+    if (!pages.length) {
+      profile.classification = "unknown";
+      profile.confidence = "low";
+      profile.reasons.push("no_pages");
+      return profile;
+    }
+
+    let glyphlessHits = 0;
+    let sampledItems = 0;
+    let textLenTotal = 0;
+
+    for (const page of pages) {
+      profile.sampledPages += 1;
+      for (const item of page.items || []) {
+        const str = normalizeText(item.str || "");
+        if (!str) continue;
+        profile.textItemCount += 1;
+        sampledItems += 1;
+        textLenTotal += str.length;
+
+        const font = (item.fontName || "").toLowerCase();
+        if (font.includes("glyphless") || font.includes("fallback") || font.includes("unknown")) {
+          glyphlessHits += 1;
+        }
+
+        const words = str.split(/\s+/).filter(Boolean);
+        profile.wordCount += words.length;
+        for (const w of words) {
+          if (/[\p{L}]/u.test(w)) profile.alphabeticCount += 1;
+          if (/^[^\p{L}\p{N}]+$/u.test(w)) profile.symbolCount += 1;
+          if (w.length >= 18) profile.longWordCount += 1;
+        }
+      }
+    }
+
+    profile.glyphlessItemRatio = sampledItems ? glyphlessHits / sampledItems : 0;
+    profile.avgTextLenPerItem = sampledItems ? textLenTotal / sampledItems : 0;
+
+    const symbolRatio = profile.wordCount ? profile.symbolCount / profile.wordCount : 0;
+    const longWordRatio = profile.wordCount ? profile.longWordCount / profile.wordCount : 0;
+
+    if (profile.glyphlessItemRatio > 0.25) profile.reasons.push("glyphless_font_layer");
+    if (symbolRatio > 0.14) profile.reasons.push("high_symbol_ratio");
+    if (longWordRatio > 0.12) profile.reasons.push("high_long_token_ratio");
+    if (profile.avgTextLenPerItem < 5) profile.reasons.push("short_text_spans");
+
+    const ocrScore =
+      (profile.glyphlessItemRatio > 0.25 ? 2 : 0) +
+      (symbolRatio > 0.14 ? 1 : 0) +
+      (longWordRatio > 0.12 ? 1 : 0) +
+      (profile.avgTextLenPerItem < 5 ? 1 : 0);
+
+    if (ocrScore >= 2) {
+      profile.classification = "ocr-overlay";
+      profile.confidence = ocrScore >= 3 ? "high" : "medium";
+    }
+
+    return profile;
+  }
+
   function convertPdfItemsToMarkdown(rawPages) {
+    const profile = analyzeDocumentProfile(rawPages);
     const analyzed = rawPages.map((page, i) =>
       analyzePage(page.items, page.width, page.height, i + 1),
-    );
+    ).map((page) => {
+      if (profile.classification !== "ocr-overlay") return page;
+      const lines = page.lines.map((line) => {
+        if (line.region === "sidebar" || line.region === "metadata") {
+          return { ...line, region: "furniture" };
+        }
+        if (line.region === "heading" && line.text.length < 4) {
+          return { ...line, region: "body" };
+        }
+        return line;
+      });
+      return { ...page, lines };
+    });
     const cleaned = suppressRepeatedFurniture(analyzed);
     return assembleMarkdown(cleaned);
   }
@@ -477,9 +568,21 @@
   }
 
   function extractStructuredPages(rawPages) {
+    const profile = analyzeDocumentProfile(rawPages);
     const analyzed = rawPages.map((page, i) =>
       analyzePage(page.items, page.width, page.height, i + 1),
-    );
+    ).map((page) => {
+      if (profile.classification !== "ocr-overlay") return page;
+      return {
+        ...page,
+        lines: page.lines.map((line) => {
+          if (line.region === "sidebar" || line.region === "metadata") {
+            return { ...line, region: "furniture" };
+          }
+          return line;
+        }),
+      };
+    });
     const cleaned = suppressRepeatedFurniture(analyzed);
     return cleaned.map((page, i) => {
       const { text, headings } = extractPageText(page);
@@ -500,6 +603,7 @@
     orderPageLines,
     assembleMarkdown,
     classifyLine,
+    analyzeDocumentProfile,
   };
 
   if (typeof module !== "undefined" && module.exports) {
