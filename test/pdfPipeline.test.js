@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { convertPdfItemsToMarkdown, extractStructuredPages } = require('../pdfPipeline');
+const { convertPdfItemsToMarkdown, extractStructuredPages, analyzeDocumentProfile } = require('../pdfPipeline');
 
 function page(width, height, lines) {
   return {
@@ -210,4 +210,47 @@ test('extractStructuredPages returns empty text for pages with only furniture', 
   assert.equal(pages.length, 1);
   assert.equal(pages[0].text, '');
   assert.equal(pages[0].char_count, 0);
+});
+
+
+test('preflight classifier marks glyphless-heavy content as ocr-overlay', () => {
+  const profile = analyzeDocumentProfile([
+    page(600, 800, [
+      { text: 'A noisy title', x: 80, y: 740, width: 150, fontName: 'GlyphLessFont' },
+      { text: '%%% ####', x: 80, y: 710, width: 120, fontName: 'GlyphLessFont' },
+      { text: 'withveryveryverylongmergedtoken', x: 80, y: 690, width: 220, fontName: 'GlyphLessFont' },
+    ]),
+  ]);
+  assert.equal(profile.classification, 'ocr-overlay');
+  assert.ok(profile.reasons.includes('glyphless_font_layer'));
+});
+
+test('ocr-overlay routing demotes short false headings', () => {
+  const md = convertPdfItemsToMarkdown([
+    page(700, 900, [
+      { text: 'IX', x: 90, y: 850, width: 30, font: 18, fontName: 'GlyphLessFont Bold' },
+      { text: 'This is body text under a noisy short heading.', x: 90, y: 810, width: 420, fontName: 'GlyphLessFont' },
+    ]),
+  ]);
+  assert.doesNotMatch(md, /## IX/);
+  assert.match(md, /IX\s+This is body text under a noisy short heading\./);
+});
+
+
+test('block ordering keeps top matter before two-column body and footer after', () => {
+  const md = convertPdfItemsToMarkdown([
+    page(900, 1200, [
+      { text: 'Paper Title', x: 240, y: 1120, width: 420, font: 22, fontName: 'Bold' },
+      { text: 'Author Name', x: 300, y: 1085, width: 220, font: 14 },
+      { text: 'L1 body', x: 90, y: 960, width: 280 },
+      { text: 'L2 body', x: 90, y: 930, width: 280 },
+      { text: 'L3 body', x: 90, y: 900, width: 280 },
+      { text: 'R1 body', x: 520, y: 960, width: 280 },
+      { text: 'R2 body', x: 520, y: 930, width: 280 },
+      { text: 'R3 body', x: 520, y: 900, width: 280 },
+      { text: 'Conclusion line.', x: 120, y: 120, width: 620 },
+    ]),
+  ]);
+  assert.ok(md.indexOf('Paper Title') < md.indexOf('L1 body'));
+  assert.ok(md.indexOf('R3 body') < md.indexOf('Conclusion line.'));
 });

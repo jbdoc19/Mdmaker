@@ -309,6 +309,78 @@
       .trim();
   }
 
+
+  function clusterByVerticalBands(lines) {
+    if (lines.length <= 1) return [{ minY: -Infinity, maxY: Infinity, lines: [...lines] }];
+    const sorted = [...lines].sort((a, b) => b.y - a.y);
+    const gaps = [];
+    for (let i = 0; i < sorted.length - 1; i += 1) {
+      const gap = sorted[i].y - sorted[i + 1].y;
+      gaps.push({ idx: i, gap });
+    }
+
+    const avgHeight = average(sorted.map((l) => l.height || 10)) || 10;
+    const minSplitGap = Math.max(26, avgHeight * 2.2);
+    const splitPoints = gaps
+      .filter((g) => g.gap >= minSplitGap)
+      .sort((a, b) => b.gap - a.gap)
+      .slice(0, 3)
+      .map((g) => g.idx)
+      .sort((a, b) => a - b);
+
+    const bands = [];
+    let start = 0;
+    for (const splitIdx of splitPoints) {
+      const part = sorted.slice(start, splitIdx + 1);
+      if (part.length) {
+        bands.push({
+          minY: part[part.length - 1].y,
+          maxY: part[0].y,
+          lines: part,
+        });
+      }
+      start = splitIdx + 1;
+    }
+    const tail = sorted.slice(start);
+    if (tail.length) {
+      bands.push({ minY: tail[tail.length - 1].y, maxY: tail[0].y, lines: tail });
+    }
+    return bands.length ? bands : [{ minY: -Infinity, maxY: Infinity, lines: sorted }];
+  }
+
+  function orderBandLines(lines, columnCount) {
+    if (columnCount <= 1) return [...lines].sort((a, b) => b.y - a.y || a.left - b.left);
+
+    const standalone = [];
+    const byColumn = Array.from({ length: columnCount }, () => []);
+
+    for (const line of lines) {
+      if (line.column === -1 || line.width > 0.82 * (line.pageWidth || Infinity)) {
+        standalone.push(line);
+      } else if (line.column >= 0 && line.column < columnCount) {
+        byColumn[line.column].push(line);
+      } else {
+        standalone.push(line);
+      }
+    }
+
+    standalone.sort((a, b) => b.y - a.y || a.left - b.left);
+    byColumn.forEach((group) => group.sort((a, b) => b.y - a.y || a.left - b.left));
+
+    const highestColumnTop = byColumn.some((g) => g.length)
+      ? Math.max(...byColumn.map((g) => (g[0] ? g[0].y : -Infinity)))
+      : -Infinity;
+    const lowestColumnBottom = byColumn.some((g) => g.length)
+      ? Math.min(...byColumn.map((g) => (g[g.length - 1] ? g[g.length - 1].y : Infinity)))
+      : Infinity;
+
+    const top = standalone.filter((line) => line.y > highestColumnTop);
+    const mid = standalone.filter((line) => line.y <= highestColumnTop && line.y >= lowestColumnBottom);
+    const bottom = standalone.filter((line) => line.y < lowestColumnBottom);
+
+    return [...top, ...byColumn.flatMap((g) => g), ...mid, ...bottom];
+  }
+
   function assembleReferences(lines) {
     const byColumn = new Map();
     for (const line of lines) {
@@ -334,36 +406,42 @@
     return entries.filter(Boolean).map((entry) => `- ${entry}`).join("\n");
   }
   function orderPageLines(page) {
-    if (page.columns.count === 1) {
-      return [...page.lines].sort((a, b) => b.y - a.y);
-    }
+    if (page.columns.count > 1) {
+      const standalone = [];
+      const byColumn = Array.from({ length: page.columns.count }, () => []);
 
-    const standalone = [];
-    const byColumn = Array.from({ length: page.columns.count }, () => []);
-
-    for (const line of page.lines) {
-      if (line.column === -1 || page.columns.count === 1) {
-        standalone.push(line);
-      } else {
-        byColumn[line.column].push(line);
+      for (const line of page.lines) {
+        if (line.column === -1 || page.columns.count === 1) {
+          standalone.push(line);
+        } else {
+          byColumn[line.column].push(line);
+        }
       }
+
+      standalone.sort((a, b) => b.y - a.y);
+      byColumn.forEach((group) => group.sort((a, b) => b.y - a.y));
+
+      const highestColumnTop = byColumn.length
+        ? Math.max(...byColumn.map((g) => (g[0] ? g[0].y : -Infinity)))
+        : -Infinity;
+      const lowestColumnBottom = byColumn.length
+        ? Math.min(...byColumn.map((g) => (g[g.length - 1] ? g[g.length - 1].y : Infinity)))
+        : Infinity;
+
+      const top = standalone.filter((line) => line.y > highestColumnTop);
+      const mid = standalone.filter((line) => line.y <= highestColumnTop && line.y >= lowestColumnBottom);
+      const bottom = standalone.filter((line) => line.y < lowestColumnBottom);
+
+      return [...top, ...byColumn.flatMap((g) => g), ...mid, ...bottom];
     }
 
-    standalone.sort((a, b) => b.y - a.y);
-    byColumn.forEach((group) => group.sort((a, b) => b.y - a.y));
-
-    const highestColumnTop = byColumn.length
-      ? Math.max(...byColumn.map((g) => (g[0] ? g[0].y : -Infinity)))
-      : -Infinity;
-    const lowestColumnBottom = byColumn.length
-      ? Math.min(...byColumn.map((g) => (g[g.length - 1] ? g[g.length - 1].y : Infinity)))
-      : Infinity;
-
-    const top = standalone.filter((line) => line.y > highestColumnTop);
-    const mid = standalone.filter((line) => line.y <= highestColumnTop && line.y >= lowestColumnBottom);
-    const bottom = standalone.filter((line) => line.y < lowestColumnBottom);
-
-    return [...top, ...byColumn.flatMap((g) => g), ...mid, ...bottom];
+    const prepared = page.lines.map((line) => ({ ...line, pageWidth: page.pageWidth }));
+    const bands = clusterByVerticalBands(prepared);
+    const ordered = [];
+    for (const band of bands) {
+      ordered.push(...orderBandLines(band.lines, 1));
+    }
+    return ordered;
   }
 
   function assembleMarkdown(pages) {
@@ -429,10 +507,101 @@
     return out.filter(Boolean).join("\n\n").replace(/\n{3,}/g, "\n\n").trim();
   }
 
+
+  function analyzeDocumentProfile(rawPages) {
+    const pages = rawPages || [];
+    const profile = {
+      pageCount: pages.length,
+      sampledPages: 0,
+      textItemCount: 0,
+      wordCount: 0,
+      alphabeticCount: 0,
+      symbolCount: 0,
+      longWordCount: 0,
+      glyphlessItemRatio: 0,
+      avgTextLenPerItem: 0,
+      classification: "digital-native",
+      confidence: "medium",
+      reasons: [],
+    };
+
+    if (!pages.length) {
+      profile.classification = "unknown";
+      profile.confidence = "low";
+      profile.reasons.push("no_pages");
+      return profile;
+    }
+
+    let glyphlessHits = 0;
+    let sampledItems = 0;
+    let textLenTotal = 0;
+
+    for (const page of pages) {
+      profile.sampledPages += 1;
+      for (const item of page.items || []) {
+        const str = normalizeText(item.str || "");
+        if (!str) continue;
+        profile.textItemCount += 1;
+        sampledItems += 1;
+        textLenTotal += str.length;
+
+        const font = (item.fontName || "").toLowerCase();
+        if (font.includes("glyphless") || font.includes("fallback") || font.includes("unknown")) {
+          glyphlessHits += 1;
+        }
+
+        const words = str.split(/\s+/).filter(Boolean);
+        profile.wordCount += words.length;
+        for (const w of words) {
+          if (/[\p{L}]/u.test(w)) profile.alphabeticCount += 1;
+          if (/^[^\p{L}\p{N}]+$/u.test(w)) profile.symbolCount += 1;
+          if (w.length >= 18) profile.longWordCount += 1;
+        }
+      }
+    }
+
+    profile.glyphlessItemRatio = sampledItems ? glyphlessHits / sampledItems : 0;
+    profile.avgTextLenPerItem = sampledItems ? textLenTotal / sampledItems : 0;
+
+    const symbolRatio = profile.wordCount ? profile.symbolCount / profile.wordCount : 0;
+    const longWordRatio = profile.wordCount ? profile.longWordCount / profile.wordCount : 0;
+
+    if (profile.glyphlessItemRatio > 0.25) profile.reasons.push("glyphless_font_layer");
+    if (symbolRatio > 0.14) profile.reasons.push("high_symbol_ratio");
+    if (longWordRatio > 0.12) profile.reasons.push("high_long_token_ratio");
+    if (profile.avgTextLenPerItem < 5) profile.reasons.push("short_text_spans");
+
+    const ocrScore =
+      (profile.glyphlessItemRatio > 0.25 ? 2 : 0) +
+      (symbolRatio > 0.14 ? 1 : 0) +
+      (longWordRatio > 0.12 ? 1 : 0) +
+      (profile.avgTextLenPerItem < 5 ? 1 : 0);
+
+    if (ocrScore >= 2) {
+      profile.classification = "ocr-overlay";
+      profile.confidence = ocrScore >= 3 ? "high" : "medium";
+    }
+
+    return profile;
+  }
+
   function convertPdfItemsToMarkdown(rawPages) {
+    const profile = analyzeDocumentProfile(rawPages);
     const analyzed = rawPages.map((page, i) =>
       analyzePage(page.items, page.width, page.height, i + 1),
-    );
+    ).map((page) => {
+      if (profile.classification !== "ocr-overlay") return page;
+      const lines = page.lines.map((line) => {
+        if (line.region === "sidebar" || line.region === "metadata") {
+          return { ...line, region: "furniture" };
+        }
+        if (line.region === "heading" && line.text.length < 4) {
+          return { ...line, region: "body" };
+        }
+        return line;
+      });
+      return { ...page, lines };
+    });
     const cleaned = suppressRepeatedFurniture(analyzed);
     return assembleMarkdown(cleaned);
   }
@@ -477,9 +646,21 @@
   }
 
   function extractStructuredPages(rawPages) {
+    const profile = analyzeDocumentProfile(rawPages);
     const analyzed = rawPages.map((page, i) =>
       analyzePage(page.items, page.width, page.height, i + 1),
-    );
+    ).map((page) => {
+      if (profile.classification !== "ocr-overlay") return page;
+      return {
+        ...page,
+        lines: page.lines.map((line) => {
+          if (line.region === "sidebar" || line.region === "metadata") {
+            return { ...line, region: "furniture" };
+          }
+          return line;
+        }),
+      };
+    });
     const cleaned = suppressRepeatedFurniture(analyzed);
     return cleaned.map((page, i) => {
       const { text, headings } = extractPageText(page);
@@ -500,6 +681,7 @@
     orderPageLines,
     assembleMarkdown,
     classifyLine,
+    analyzeDocumentProfile,
   };
 
   if (typeof module !== "undefined" && module.exports) {
