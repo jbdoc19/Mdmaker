@@ -648,7 +648,7 @@
       profile,
       quality,
       warnings: quality.warnings,
-      fallback_suggestion: quality.level !== "good"
+      fallbackSuggestion: quality.level !== "good"
         ? "Try OCR-specific extraction settings or use a higher-quality source PDF."
         : "",
     };
