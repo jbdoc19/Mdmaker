@@ -235,3 +235,20 @@ test('ocr-overlay routing demotes short false headings', () => {
   assert.doesNotMatch(md, /## IX/);
   assert.match(md, /IX\s+This is body text under a noisy short heading\./);
 });
+test('block ordering keeps top matter before two-column body and footer after', () => {
+  const md = convertPdfItemsToMarkdown([
+    page(900, 1200, [
+      { text: 'Paper Title', x: 240, y: 1120, width: 420, font: 22, fontName: 'Bold' },
+      { text: 'Author Name', x: 300, y: 1085, width: 220, font: 14 },
+      { text: 'L1 body', x: 90, y: 960, width: 280 },
+      { text: 'L2 body', x: 90, y: 930, width: 280 },
+      { text: 'L3 body', x: 90, y: 900, width: 280 },
+      { text: 'R1 body', x: 520, y: 960, width: 280 },
+      { text: 'R2 body', x: 520, y: 930, width: 280 },
+      { text: 'R3 body', x: 520, y: 900, width: 280 },
+      { text: 'Conclusion line.', x: 120, y: 120, width: 620 },
+    ]),
+  ]);
+  assert.ok(md.indexOf('Paper Title') < md.indexOf('L1 body'));
+  assert.ok(md.indexOf('R3 body') < md.indexOf('Conclusion line.'));
+});

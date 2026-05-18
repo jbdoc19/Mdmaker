@@ -309,6 +309,78 @@
       .trim();
   }
 
+
+  function clusterByVerticalBands(lines) {
+    if (lines.length <= 1) return [{ minY: -Infinity, maxY: Infinity, lines: [...lines] }];
+    const sorted = [...lines].sort((a, b) => b.y - a.y);
+    const gaps = [];
+    for (let i = 0; i < sorted.length - 1; i += 1) {
+      const gap = sorted[i].y - sorted[i + 1].y;
+      gaps.push({ idx: i, gap });
+    }
+
+    const avgHeight = average(sorted.map((l) => l.height || 10)) || 10;
+    const minSplitGap = Math.max(26, avgHeight * 2.2);
+    const splitPoints = gaps
+      .filter((g) => g.gap >= minSplitGap)
+      .sort((a, b) => b.gap - a.gap)
+      .slice(0, 3)
+      .map((g) => g.idx)
+      .sort((a, b) => a - b);
+
+    const bands = [];
+    let start = 0;
+    for (const splitIdx of splitPoints) {
+      const part = sorted.slice(start, splitIdx + 1);
+      if (part.length) {
+        bands.push({
+          minY: part[part.length - 1].y,
+          maxY: part[0].y,
+          lines: part,
+        });
+      }
+      start = splitIdx + 1;
+    }
+    const tail = sorted.slice(start);
+    if (tail.length) {
+      bands.push({ minY: tail[tail.length - 1].y, maxY: tail[0].y, lines: tail });
+    }
+    return bands.length ? bands : [{ minY: -Infinity, maxY: Infinity, lines: sorted }];
+  }
+
+  function orderBandLines(lines, columnCount) {
+    if (columnCount <= 1) return [...lines].sort((a, b) => b.y - a.y || a.left - b.left);
+
+    const standalone = [];
+    const byColumn = Array.from({ length: columnCount }, () => []);
+
+    for (const line of lines) {
+      if (line.column === -1 || line.width > 0.82 * (line.pageWidth || Infinity)) {
+        standalone.push(line);
+      } else if (line.column >= 0 && line.column < columnCount) {
+        byColumn[line.column].push(line);
+      } else {
+        standalone.push(line);
+      }
+    }
+
+    standalone.sort((a, b) => b.y - a.y || a.left - b.left);
+    byColumn.forEach((group) => group.sort((a, b) => b.y - a.y || a.left - b.left));
+
+    const highestColumnTop = byColumn.some((g) => g.length)
+      ? Math.max(...byColumn.map((g) => (g[0] ? g[0].y : -Infinity)))
+      : -Infinity;
+    const lowestColumnBottom = byColumn.some((g) => g.length)
+      ? Math.min(...byColumn.map((g) => (g[g.length - 1] ? g[g.length - 1].y : Infinity)))
+      : Infinity;
+
+    const top = standalone.filter((line) => line.y > highestColumnTop);
+    const mid = standalone.filter((line) => line.y <= highestColumnTop && line.y >= lowestColumnBottom);
+    const bottom = standalone.filter((line) => line.y < lowestColumnBottom);
+
+    return [...top, ...byColumn.flatMap((g) => g), ...mid, ...bottom];
+  }
+
   function assembleReferences(lines) {
     const byColumn = new Map();
     for (const line of lines) {
@@ -334,36 +406,42 @@
     return entries.filter(Boolean).map((entry) => `- ${entry}`).join("\n");
   }
   function orderPageLines(page) {
-    if (page.columns.count === 1) {
-      return [...page.lines].sort((a, b) => b.y - a.y);
-    }
+    if (page.columns.count > 1) {
+      const standalone = [];
+      const byColumn = Array.from({ length: page.columns.count }, () => []);
 
-    const standalone = [];
-    const byColumn = Array.from({ length: page.columns.count }, () => []);
-
-    for (const line of page.lines) {
-      if (line.column === -1 || page.columns.count === 1) {
-        standalone.push(line);
-      } else {
-        byColumn[line.column].push(line);
+      for (const line of page.lines) {
+        if (line.column === -1 || page.columns.count === 1) {
+          standalone.push(line);
+        } else {
+          byColumn[line.column].push(line);
+        }
       }
+
+      standalone.sort((a, b) => b.y - a.y);
+      byColumn.forEach((group) => group.sort((a, b) => b.y - a.y));
+
+      const highestColumnTop = byColumn.length
+        ? Math.max(...byColumn.map((g) => (g[0] ? g[0].y : -Infinity)))
+        : -Infinity;
+      const lowestColumnBottom = byColumn.length
+        ? Math.min(...byColumn.map((g) => (g[g.length - 1] ? g[g.length - 1].y : Infinity)))
+        : Infinity;
+
+      const top = standalone.filter((line) => line.y > highestColumnTop);
+      const mid = standalone.filter((line) => line.y <= highestColumnTop && line.y >= lowestColumnBottom);
+      const bottom = standalone.filter((line) => line.y < lowestColumnBottom);
+
+      return [...top, ...byColumn.flatMap((g) => g), ...mid, ...bottom];
     }
 
-    standalone.sort((a, b) => b.y - a.y);
-    byColumn.forEach((group) => group.sort((a, b) => b.y - a.y));
-
-    const highestColumnTop = byColumn.length
-      ? Math.max(...byColumn.map((g) => (g[0] ? g[0].y : -Infinity)))
-      : -Infinity;
-    const lowestColumnBottom = byColumn.length
-      ? Math.min(...byColumn.map((g) => (g[g.length - 1] ? g[g.length - 1].y : Infinity)))
-      : Infinity;
-
-    const top = standalone.filter((line) => line.y > highestColumnTop);
-    const mid = standalone.filter((line) => line.y <= highestColumnTop && line.y >= lowestColumnBottom);
-    const bottom = standalone.filter((line) => line.y < lowestColumnBottom);
-
-    return [...top, ...byColumn.flatMap((g) => g), ...mid, ...bottom];
+    const prepared = page.lines.map((line) => ({ ...line, pageWidth: page.pageWidth }));
+    const bands = clusterByVerticalBands(prepared);
+    const ordered = [];
+    for (const band of bands) {
+      ordered.push(...orderBandLines(band.lines, 1));
+    }
+    return ordered;
   }
 
   function assembleMarkdown(pages) {
