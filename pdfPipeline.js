@@ -540,49 +540,6 @@
     return out.filter(Boolean).join("\n\n").replace(/\n{3,}/g, "\n\n").trim();
   }
 
-  function scoreMarkdownQuality(markdown, profile) {
-    const text = markdown || "";
-    const lines = text.split(/\n+/).filter(Boolean);
-    const words = text.split(/\s+/).filter(Boolean);
-    const shortLineRate = lines.length
-      ? lines.filter((line) => line.length > 0 && line.length < 5).length / lines.length
-      : 0;
-    const symbolHeavyRate = lines.length
-      ? lines.filter((line) => {
-        const symbols = (line.match(/[^\p{L}\p{N}\s]/gu) || []).length;
-        return line.length > 4 && symbols / line.length > 0.28;
-      }).length / lines.length
-      : 0;
-    const headingCount = lines.filter((line) => line.startsWith("## ")).length;
-    const malformedHeadingRate = headingCount
-      ? lines.filter((line) => line.startsWith("## ") && line.replace(/^##\s+/, "").trim().length < 4).length / headingCount
-      : 0;
-    const alphaWords = words.filter((w) => /[A-Za-z]/.test(w)).length;
-    const dictionaryLikeRate = words.length ? alphaWords / words.length : 0;
-
-    const rawScore =
-      100 -
-      shortLineRate * 30 -
-      symbolHeavyRate * 35 -
-      malformedHeadingRate * 25 -
-      (1 - dictionaryLikeRate) * 20 -
-      (profile.classification === "ocr-overlay" ? 8 : 0);
-    const score = Math.max(0, Math.min(100, Math.round(rawScore)));
-    let level = "good";
-    if (score < 70) level = "degraded";
-    if (score < 45) level = "unusable";
-    const warnings = [];
-    if (level !== "good") warnings.push("Output quality appears degraded; source PDF may be OCR/noisy.");
-    if (profile.classification === "ocr-overlay") warnings.push("OCR-overlay preflight detected; consider OCR-friendly extraction settings.");
-
-    return {
-      score,
-      level,
-      warnings,
-      metrics: { shortLineRate, symbolHeavyRate, malformedHeadingRate, dictionaryLikeRate },
-    };
-  }
-
 
   function analyzeDocumentProfile(rawPages) {
     const pages = rawPages || [];
@@ -773,9 +730,6 @@
     assembleMarkdown,
     classifyLine,
     analyzeDocumentProfile,
-    applyTextCorrections,
-    scoreMarkdownQuality,
-    convertPdfItemsToMarkdownWithReport,
   };
 
   if (typeof module !== "undefined" && module.exports) {

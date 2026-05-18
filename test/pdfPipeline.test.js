@@ -1,14 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const {
-  convertPdfItemsToMarkdown,
-  extractStructuredPages,
-  analyzeDocumentProfile,
-  applyTextCorrections,
-  scoreMarkdownQuality,
-  convertPdfItemsToMarkdownWithReport,
-} = require('../pdfPipeline');
+const { convertPdfItemsToMarkdown, extractStructuredPages, analyzeDocumentProfile } = require('../pdfPipeline');
 
 function page(width, height, lines) {
   return {
@@ -243,8 +235,6 @@ test('ocr-overlay routing demotes short false headings', () => {
   assert.doesNotMatch(md, /## IX/);
   assert.match(md, /IX\s+This is body text under a noisy short heading\./);
 });
-
-
 test('block ordering keeps top matter before two-column body and footer after', () => {
   const md = convertPdfItemsToMarkdown([
     page(900, 1200, [
@@ -261,34 +251,4 @@ test('block ordering keeps top matter before two-column body and footer after', 
   ]);
   assert.ok(md.indexOf('Paper Title') < md.indexOf('L1 body'));
   assert.ok(md.indexOf('R3 body') < md.indexOf('Conclusion line.'));
-});
-
-test('post-processing text correction repairs camel-case and punctuation spacing', () => {
-  const corrected = applyTextCorrections('CodependentNo More ,andAgain', 'medium');
-  assert.equal(corrected.text, 'Codependent No More,and Again');
-  assert.equal(corrected.corrected, true);
-});
-
-test('quality report returns warnings for degraded OCR-like markdown', () => {
-  const noisyMd = fs.readFileSync('annas-arch-924e9a9d059d.md', 'utf8')
-    .split('\n')
-    .slice(0, 220)
-    .join('\n');
-  const quality = scoreMarkdownQuality(noisyMd, { classification: 'ocr-overlay' });
-  assert.ok(quality.score < 90);
-  assert.ok(quality.warnings.length > 0);
-});
-
-test('conversion report includes fallback suggestion when quality is degraded', () => {
-  const report = convertPdfItemsToMarkdownWithReport([
-    page(600, 800, [
-      { text: '%%%', x: 80, y: 740, width: 80, fontName: 'GlyphLessFont' },
-      { text: '??', x: 80, y: 710, width: 80, fontName: 'GlyphLessFont' },
-      { text: 'A', x: 80, y: 680, width: 20, fontName: 'GlyphLessFont' },
-    ]),
-  ]);
-  assert.ok(report.quality.score <= 100);
-  if (report.quality.level !== 'good') {
-    assert.notEqual(report.fallback_suggestion, '');
-  }
 });
