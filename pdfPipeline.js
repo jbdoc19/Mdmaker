@@ -15,6 +15,22 @@
       .trim();
   }
 
+  function applyTextCorrections(text, confidence) {
+    let next = normalizeText(text);
+    if (!next) return { text: "", corrected: false };
+    const original = next;
+    if (confidence !== "low") {
+      next = next
+        .replace(/([a-z])([A-Z])/g, "$1 $2")
+        .replace(/([a-z])([0-9])/g, "$1 $2")
+        .replace(/([0-9])([A-Za-z])/g, "$1 $2")
+        .replace(/\s+([,.;:!?])/g, "$1")
+        .replace(/\s+/g, " ")
+        .trim();
+    }
+    return { text: next, corrected: next !== original };
+  }
+
   function groupItemsIntoLines(items) {
     const sorted = [...items].sort((a, b) => {
       if (Math.abs(b.y - a.y) > 1) return b.y - a.y;
@@ -197,14 +213,25 @@
     if (/^keywords?\b/i.test(t)) return "keywords_heading";
     if (/^doi\b|^received\b|^accepted\b|^published\b/i.test(t)) return "metadata";
 
-    const isShort = text.split(/\s+/).length <= 14 && text.length <= 100;
+    const tokenCount = text.split(/\s+/).length;
+    const alphaCount = (text.match(/[A-Za-z]/g) || []).length;
+    const symbolCount = (text.match(/[^\p{L}\p{N}\s]/gu) || []).length;
+    const symbolRatio = text.length ? symbolCount / text.length : 0;
+    const isShort = tokenCount <= 14 && text.length <= 100;
+    const mostlyAlpha = alphaCount >= 4;
     const looksHeadingText =
       /^(\d+(\.\d+)*\s+\S+|[ivx]+\.\s+\S+)/i.test(text) ||
       /^(introduction|methods?|results?|discussion|conclusion|background|materials and methods)\b/i.test(t);
+    const headingConfidence =
+      (looksHeadingText ? 2 : 0) +
+      (line.fontSize > ctx.bodyFontSize * 1.16 ? 1 : 0) +
+      (line.boldRatio > 0.68 ? 1 : 0);
     if (
       isShort &&
+      mostlyAlpha &&
+      symbolRatio < 0.18 &&
       !/[.!?]$/.test(text) &&
-      (looksHeadingText || line.fontSize > ctx.bodyFontSize * 1.1 || line.boldRatio > 0.6)
+      headingConfidence >= 2
     ) {
       return "heading";
     }
@@ -220,7 +247,7 @@
     const normalized = items
       .filter((i) => i && typeof i.str === "string" && i.str.trim())
       .map((i) => ({
-        str: normalizeText(i.str),
+        str: i.str,
         x: i.transform?.[4] ?? 0,
         y: i.transform?.[5] ?? 0,
         width: i.width || 0,
@@ -228,6 +255,11 @@
         fontSize: Math.abs(i.transform?.[0] || i.height || 10),
         fontName: i.fontName || "",
       }))
+      .filter((i) => i.str)
+      .map((i) => {
+        const correction = applyTextCorrections(i.str, "medium");
+        return { ...i, str: correction.text, corrected: correction.corrected };
+      })
       .filter((i) => i.str);
 
     const lines = groupItemsIntoLines(normalized);
@@ -305,6 +337,7 @@
       })
       .join("")
       .replace(/-\s+/g, "")
+      .replace(/\s+([,.;:!?])/g, "$1")
       .replace(/\s+/g, " ")
       .trim();
   }
@@ -604,6 +637,21 @@
     });
     const cleaned = suppressRepeatedFurniture(analyzed);
     return assembleMarkdown(cleaned);
+  }
+
+  function convertPdfItemsToMarkdownWithReport(rawPages) {
+    const profile = analyzeDocumentProfile(rawPages);
+    const markdown = convertPdfItemsToMarkdown(rawPages);
+    const quality = scoreMarkdownQuality(markdown, profile);
+    return {
+      markdown,
+      profile,
+      quality,
+      warnings: quality.warnings,
+      fallbackSuggestion: quality.level !== "good"
+        ? "Try OCR-specific extraction settings or use a higher-quality source PDF."
+        : "",
+    };
   }
 
   function extractPageText(page) {
