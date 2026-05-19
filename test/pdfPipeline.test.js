@@ -252,3 +252,31 @@ test('block ordering keeps top matter before two-column body and footer after', 
   assert.ok(md.indexOf('Paper Title') < md.indexOf('L1 body'));
   assert.ok(md.indexOf('R3 body') < md.indexOf('Conclusion line.'));
 });
+
+test('low-confidence page mode demotes noisy false headings', () => {
+  const md = convertPdfItemsToMarkdown([
+    page(700, 900, [
+      { text: 'IX', x: 90, y: 860, width: 30, font: 18, fontName: 'Bold' },
+      { text: 'UEEULELLELL1,beuerpete en intone late', x: 90, y: 830, width: 420 },
+      { text: 'The Inevitability ofQur Future.', x: 90, y: 810, width: 320 },
+      { text: 'Readable body line starts here.', x: 90, y: 780, width: 320 },
+    ]),
+  ]);
+  assert.doesNotMatch(md, /## IX/);
+  assert.match(md, /Readable body line starts here\./);
+});
+
+test('very noisy lines are quarantined from output on low-confidence pages', () => {
+  const md = convertPdfItemsToMarkdown([
+    page(700, 900, [
+      { text: 'A normal sentence appears.', x: 90, y: 780, width: 320 },
+      { text: '§ § § ### !!! @@ @@ @@', x: 90, y: 760, width: 250 },
+      { text: 'B l a h xxxxxxxxxxxxxxxxxxxxx', x: 90, y: 740, width: 250 },
+      { text: '%%%% #### ---- ????', x: 90, y: 730, width: 250 },
+      { text: 'Another normal sentence.', x: 90, y: 720, width: 320 },
+    ]),
+  ]);
+  assert.match(md, /A normal sentence appears\./);
+  assert.match(md, /Another normal sentence\./);
+  assert.doesNotMatch(md, /§ § §/);
+});
