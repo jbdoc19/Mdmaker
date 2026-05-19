@@ -243,6 +243,64 @@
     return "body";
   }
 
+  function tokenize(text) {
+    return (text || "").split(/\s+/).filter(Boolean);
+  }
+
+  function lineNoiseScore(text) {
+    const tokens = tokenize(text);
+    const alpha = (text.match(/[A-Za-z]/g) || []).length;
+    const symbols = (text.match(/[^\p{L}\p{N}\s]/gu) || []).length;
+    const textLen = text.length || 1;
+    const symbolRatio = symbols / textLen;
+    const singleCharRatio = tokens.length
+      ? tokens.filter((t) => t.length === 1).length / tokens.length
+      : 0;
+    const longTokenRatio = tokens.length
+      ? tokens.filter((t) => t.length >= 20).length / tokens.length
+      : 0;
+    const alphaDensity = alpha / textLen;
+
+    let score = 0;
+    if (symbolRatio > 0.28) score += 3;
+    else if (symbolRatio > 0.22) score += 2;
+    else if (symbolRatio > 0.18) score += 1;
+    if (singleCharRatio > 0.45) score += 1;
+    if (longTokenRatio > 0.4) score += 1;
+    if (alphaDensity < 0.45 && textLen > 8) score += 1;
+    return { score, symbolRatio, singleCharRatio, longTokenRatio, alphaDensity };
+  }
+
+  function pageNoiseProfile(page) {
+    const measurable = page.lines.filter((line) => line.text && line.region !== "page_number");
+    if (!measurable.length) return { noisyRatio: 0, avgNoise: 0, lowConfidence: false };
+    const noiseScores = measurable.map((line) => lineNoiseScore(line.text).score);
+    const noisyCount = noiseScores.filter((n) => n >= 2).length;
+    const avgNoise = average(noiseScores);
+    const noisyRatio = noisyCount / measurable.length;
+    return {
+      noisyRatio,
+      avgNoise,
+      lowConfidence: noisyRatio >= 0.28 || avgNoise >= 1.7,
+    };
+  }
+
+  function applyLowConfidencePageMode(page) {
+    const hasReferences = page.lines.some((line) => line.region === "references_heading");
+    if (page.pageIndex > 12 || hasReferences) return page;
+    const np = pageNoiseProfile(page);
+    if (!np.lowConfidence) return page;
+    const lines = page.lines.map((line) => {
+      if (line.region === "heading") return { ...line, region: "body" };
+      return line;
+    }).filter((line) => {
+      if (["furniture", "page_number", "license"].includes(line.region)) return false;
+      const n = lineNoiseScore(line.text).score;
+      return n < 3;
+    });
+    return { ...page, lines, lowConfidence: true };
+  }
+
   function analyzePage(items, pageWidth, pageHeight, pageIndex) {
     const normalized = items
       .filter((i) => i && typeof i.str === "string" && i.str.trim())
@@ -635,7 +693,8 @@
       });
       return { ...page, lines };
     });
-    const cleaned = suppressRepeatedFurniture(analyzed);
+    const stabilized = analyzed.map((page) => applyLowConfidencePageMode(page));
+    const cleaned = suppressRepeatedFurniture(stabilized);
     return assembleMarkdown(cleaned);
   }
 
@@ -709,7 +768,8 @@
         }),
       };
     });
-    const cleaned = suppressRepeatedFurniture(analyzed);
+    const stabilized = analyzed.map((page) => applyLowConfidencePageMode(page));
+    const cleaned = suppressRepeatedFurniture(stabilized);
     return cleaned.map((page, i) => {
       const { text, headings } = extractPageText(page);
       return {
